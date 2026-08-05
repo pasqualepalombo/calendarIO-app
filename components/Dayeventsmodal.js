@@ -17,7 +17,6 @@ export default function DayEventsModal({ events, dateLabel, onSelect, onClose })
                                 <p className="text-sm font-medium">{e.title}</p>
                                 {e.start_time && <p className="text-xs text-gray-400">{e.start_time.slice(0, 5)}</p>}
                             </div>
-                            </div>
                         </div>
                     ))}
                 </div>

@@ -84,7 +84,7 @@ app/
 components/       modali ed elementi di interfaccia riutilizzabili
 lib/supabase/     client Supabase (browser e server)
 middleware.js     protegge le pagine private e gestisce la sessione
-supabase/schema.sql   script SQL completo dello schema del database
+schemaSQL   script SQL completo dello schema del database
 ```
 
 ## Funzionalità
