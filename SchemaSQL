@@ -1,0 +1,225 @@
+-- ============================================================
+-- CalendarIO — schema database completo per Supabase
+-- Versione consolidata (include le correzioni alle policy RLS)
+--
+-- Incolla ed esegui tutto questo script in:
+-- Supabase → SQL Editor → New query → Run
+-- Va eseguito una sola volta su un progetto Supabase nuovo.
+-- ============================================================
+
+-- ------------------------------------------------------------
+-- 1. PROFILES
+-- Estende auth.users con i dati che ci servono nell'app.
+-- ------------------------------------------------------------
+create table public.profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  email text not null,
+  full_name text,
+  created_at timestamptz not null default now()
+);
+
+-- Quando un utente si iscrive (auth.users), creiamo
+-- automaticamente la sua riga in profiles.
+create function public.handle_new_user()
+returns trigger as $$
+begin
+  insert into public.profiles (id, email, full_name)
+  values (
+    new.id,
+    new.email,
+    new.raw_user_meta_data ->> 'full_name'
+  );
+  return new;
+end;
+$$ language plpgsql security definer set search_path = public;
+
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute procedure public.handle_new_user();
+
+
+-- ------------------------------------------------------------
+-- 2. CALENDARS
+-- ------------------------------------------------------------
+create table public.calendars (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  owner_id uuid not null references public.profiles(id) on delete cascade,
+  created_at timestamptz not null default now()
+);
+
+
+-- ------------------------------------------------------------
+-- 3. CALENDAR_MEMBERS
+-- Relazione molti-a-molti tra utenti e calendari.
+-- ------------------------------------------------------------
+create table public.calendar_members (
+  id uuid primary key default gen_random_uuid(),
+  calendar_id uuid not null references public.calendars(id) on delete cascade,
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  role text not null default 'member' check (role in ('owner', 'member')),
+  joined_at timestamptz not null default now(),
+  unique (calendar_id, user_id)
+);
+
+-- Quando si crea un calendario, l'owner diventa
+-- automaticamente membro con ruolo 'owner'.
+create function public.handle_new_calendar()
+returns trigger as $$
+begin
+  insert into public.calendar_members (calendar_id, user_id, role)
+  values (new.id, new.owner_id, 'owner');
+  return new;
+end;
+$$ language plpgsql security definer set search_path = public;
+
+create trigger on_calendar_created
+  after insert on public.calendars
+  for each row execute procedure public.handle_new_calendar();
+
+
+-- ------------------------------------------------------------
+-- 4. EVENTS
+-- ------------------------------------------------------------
+create table public.events (
+  id uuid primary key default gen_random_uuid(),
+  calendar_id uuid not null references public.calendars(id) on delete cascade,
+  title text not null,
+  description text,
+  event_date date not null,
+  start_time time,
+  end_time time,
+  created_by uuid not null references public.profiles(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index idx_events_calendar_date on public.events (calendar_id, event_date);
+create index idx_calendar_members_user on public.calendar_members (user_id);
+
+
+-- ------------------------------------------------------------
+-- 5. FUNZIONE DI SUPPORTO PER LE POLICY
+-- Verifica l'appartenenza a un calendario bypassando la RLS,
+-- per evitare che una policy richiami se stessa all'infinito.
+-- ------------------------------------------------------------
+create function public.is_calendar_member(_calendar_id uuid, _user_id uuid)
+returns boolean
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select exists (
+    select 1 from public.calendar_members
+    where calendar_id = _calendar_id
+      and user_id = _user_id
+  );
+$$;
+
+
+-- ============================================================
+-- ROW LEVEL SECURITY
+-- ============================================================
+
+alter table public.profiles enable row level security;
+alter table public.calendars enable row level security;
+alter table public.calendar_members enable row level security;
+alter table public.events enable row level security;
+
+-- --- PROFILES ---
+create policy "Profili visibili a utenti autenticati"
+  on public.profiles for select
+  to authenticated
+  using (true);
+
+create policy "L'utente modifica solo il proprio profilo"
+  on public.profiles for update
+  to authenticated
+  using (auth.uid() = id);
+
+
+-- --- CALENDARS ---
+-- L'owner vede sempre i propri calendari (anche appena creati,
+-- senza dover aspettare il trigger su calendar_members); un membro
+-- vede i calendari a cui è stato aggiunto.
+create policy "Vede i calendari a cui partecipa"
+  on public.calendars for select
+  to authenticated
+  using (
+    owner_id = auth.uid()
+    or public.is_calendar_member(id, auth.uid())
+  );
+
+create policy "Crea un calendario"
+  on public.calendars for insert
+  to authenticated
+  with check (owner_id = auth.uid());
+
+create policy "L'owner modifica il calendario"
+  on public.calendars for update
+  to authenticated
+  using (owner_id = auth.uid());
+
+create policy "L'owner elimina il calendario"
+  on public.calendars for delete
+  to authenticated
+  using (owner_id = auth.uid());
+
+
+-- --- CALENDAR_MEMBERS ---
+create policy "Vede i membri dei propri calendari"
+  on public.calendar_members for select
+  to authenticated
+  using ( public.is_calendar_member(calendar_id, auth.uid()) );
+
+create policy "L'owner gestisce i membri"
+  on public.calendar_members for insert
+  to authenticated
+  with check (
+    exists (
+      select 1 from public.calendars
+      where calendars.id = calendar_members.calendar_id
+      and calendars.owner_id = auth.uid()
+    )
+  );
+
+create policy "L'owner rimuove membri"
+  on public.calendar_members for delete
+  to authenticated
+  using (
+    exists (
+      select 1 from public.calendars
+      where calendars.id = calendar_members.calendar_id
+      and calendars.owner_id = auth.uid()
+    )
+  );
+
+
+-- --- EVENTS ---
+create policy "Vede gli eventi dei propri calendari"
+  on public.events for select
+  to authenticated
+  using ( public.is_calendar_member(calendar_id, auth.uid()) );
+
+create policy "I membri aggiungono eventi"
+  on public.events for insert
+  to authenticated
+  with check (
+    public.is_calendar_member(calendar_id, auth.uid())
+    and created_by = auth.uid()
+  );
+
+create policy "I membri modificano eventi"
+  on public.events for update
+  to authenticated
+  using ( public.is_calendar_member(calendar_id, auth.uid()) );
+
+create policy "I membri eliminano eventi"
+  on public.events for delete
+  to authenticated
+  using ( public.is_calendar_member(calendar_id, auth.uid()) );
+
+-- ============================================================
+-- Fine schema.
+-- ============================================================
