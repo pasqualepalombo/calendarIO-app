@@ -2,11 +2,13 @@
 import { useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
 
-export default function EventFormModal({ calendarId, userId, existingEvent, onClose, onSaved }) {
+export default function EventFormModal({ calendarId, userId, existingEvent, presetDate, onClose, onSaved }) {
   const supabase = createClient();
   const [title, setTitle] = useState(existingEvent?.title || '');
   const [description, setDescription] = useState(existingEvent?.description || '');
-  const [eventDate, setEventDate] = useState(existingEvent?.event_date || new Date().toISOString().slice(0, 10));
+  const [eventDate, setEventDate] = useState(
+    existingEvent?.event_date || presetDate || new Date().toISOString().slice(0, 10)
+  );
   const [startTime, setStartTime] = useState(existingEvent?.start_time?.slice(0, 5) || '');
   const [endTime, setEndTime] = useState(existingEvent?.end_time?.slice(0, 5) || '');
   const [saving, setSaving] = useState(false);
